@@ -24,10 +24,25 @@ public class MusicApiClient {
     private final OkHttpClient okHttpClient = new OkHttpClient();
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Map<String, Song> neteaseExactCache = new ConcurrentHashMap<>();
+    private final Map<Long, String> playableAudioCache = new ConcurrentHashMap<>();
     private static final Map<String, Long> CURATED_NETEASE_IDS = Map.ofEntries(
             Map.entry("告白气球::周杰伦", 418603077L),
             Map.entry("晴天::周杰伦", 186016L),
             Map.entry("孤勇者::陈奕迅", 1901371647L)
+    );
+    private static final List<String> PLAYABLE_DISCOVERY_QUERIES = List.of(
+            "海阔天空 Live Beyond",
+            "晴天 A-LNK",
+            "告白气球 cover",
+            "孤勇者 cover",
+            "光辉岁月 Live"
+    );
+    private static final List<Long> PLAYABLE_FALLBACK_IDS = List.of(
+            28875146L,
+            3339230677L,
+            2668397359L,
+            346013L,
+            26361010L
     );
 
     private static final List<SongSeed> SONG_LIBRARY = List.of(
@@ -73,15 +88,17 @@ public class MusicApiClient {
 
     public List<Song> searchSongs(String keyword) {
         String query = keyword == null ? "" : keyword.trim();
+        String expectedSinger = extractKnownSinger(query);
         List<Song> curatedSongs = SONG_LIBRARY.stream()
                 .map(seed -> new RankedSeed(seed, score(seed, query)))
                 .filter(item -> query.isEmpty() || item.score() > 0)
+                .filter(item -> expectedSinger == null || normalizeText(item.seed().singer()).equals(normalizeText(expectedSinger)))
                 .sorted(Comparator.comparingInt(RankedSeed::score).reversed())
-                .limit(query.isEmpty() ? 16 : 8)
+                .limit(query.isEmpty() ? 6 : 8)
                 .map(item -> createMockSong(SONG_LIBRARY.indexOf(item.seed())))
                 .toList();
 
-        List<Song> remoteSongs = searchNeteaseSongs(query);
+        List<Song> remoteSongs = query.isEmpty() ? searchPlayableDiscoverySongs() : filterRemoteSongs(searchNeteaseSongs(query), query);
         List<Song> mergedSongs = new ArrayList<>(curatedSongs);
         for (Song remoteSong : remoteSongs) {
             boolean exists = mergedSongs.stream().anyMatch(song ->
@@ -104,6 +121,54 @@ public class MusicApiClient {
                 .limit(8)
                 .map(seed -> createMockSong(SONG_LIBRARY.indexOf(seed)))
                 .toList();
+    }
+
+    private List<Song> filterRemoteSongs(List<Song> songs, String query) {
+        String expectedSinger = extractKnownSinger(query);
+        if (expectedSinger == null) {
+            return songs;
+        }
+        return songs.stream()
+                .filter(song -> normalizeText(song.getSinger()).equals(normalizeText(expectedSinger))
+                        || normalizeText(song.getSinger()).startsWith(normalizeText(expectedSinger) + "/"))
+                .toList();
+    }
+
+    private String extractKnownSinger(String query) {
+        String[] singers = {"周杰伦", "陈奕迅", "张学友", "林俊杰", "王菲", "邓丽君", "刘德华", "五月天", "孙燕姿", "梁静茹", "Beyond", "谭咏麟", "邓紫棋"};
+        for (String singer : singers) {
+            if (query != null && query.contains(singer)) {
+                return singer;
+            }
+        }
+        return null;
+    }
+
+    private List<Song> searchPlayableDiscoverySongs() {
+        List<Song> result = new ArrayList<>();
+        for (Long id : PLAYABLE_FALLBACK_IDS) {
+            Song song = fetchNeteaseSongDetail(id);
+            if (song != null && song.getAudioUrl() != null && !song.getAudioUrl().isBlank()) {
+                result.add(song);
+            }
+        }
+        for (String query : PLAYABLE_DISCOVERY_QUERIES) {
+            for (Song song : searchNeteaseSongs(query)) {
+                if (song.getAudioUrl() == null || song.getAudioUrl().isBlank()) {
+                    continue;
+                }
+                boolean exists = result.stream().anyMatch(item ->
+                        item.getSongName().equalsIgnoreCase(song.getSongName())
+                                && item.getSinger().equalsIgnoreCase(song.getSinger()));
+                if (!exists) {
+                    result.add(song);
+                }
+                if (result.size() >= 8) {
+                    return result;
+                }
+            }
+        }
+        return result;
     }
 
     public List<Song> getSongsByScene(String scene) {
@@ -274,7 +339,7 @@ public class MusicApiClient {
             song.setAlbum(item.path("album").path("name").asText("网易云音乐"));
             song.setExternalId("netease_" + id);
             song.setCoverUrl(item.path("album").path("picUrl").asText("https://picsum.photos/seed/netease-" + id + "/300/300"));
-            song.setAudioUrl("https://music.163.com/song/media/outer/url?id=" + id + ".mp3");
+            song.setAudioUrl(resolvePlayableAudioUrl(id));
             song.setDuration(Math.max(120, item.path("duration").asInt(240000) / 1000));
             return song;
         } catch (Exception e) {
@@ -355,7 +420,7 @@ public class MusicApiClient {
                 song.setSceneTags(keyword);
                 song.setExternalId("netease_" + neteaseId);
                 song.setCoverUrl(item.path("album").path("picUrl").asText("https://picsum.photos/seed/netease-" + neteaseId + "/300/300"));
-                song.setAudioUrl("https://music.163.com/song/media/outer/url?id=" + neteaseId + ".mp3");
+                song.setAudioUrl(resolvePlayableAudioUrl(neteaseId));
                 song.setPopularity(7000 + Math.min(result.size() * 300, 2500));
                 song.setDuration(Math.max(120, item.path("duration").asInt(240000) / 1000));
                 result.add(song);
@@ -364,6 +429,41 @@ public class MusicApiClient {
         } catch (Exception e) {
             log.warn("Netease music search failed, fallback to local library: {}", e.getMessage());
             return List.of();
+        }
+    }
+
+    private String resolvePlayableAudioUrl(Long neteaseId) {
+        if (playableAudioCache.containsKey(neteaseId)) {
+            return playableAudioCache.get(neteaseId);
+        }
+        String outerUrl = "https://music.163.com/song/media/outer/url?id=" + neteaseId + ".mp3";
+        String playableUrl = isPlayableAudioUrl(outerUrl) ? outerUrl : null;
+        if (playableUrl != null) {
+            playableAudioCache.put(neteaseId, playableUrl);
+        }
+        return playableUrl;
+    }
+
+    private boolean isPlayableAudioUrl(String audioUrl) {
+        Request request = new Request.Builder()
+                .url(audioUrl)
+                .header("User-Agent", "Mozilla/5.0 KTV-AI-Agent-Assistant")
+                .header("Referer", "https://music.163.com/")
+                .header("Range", "bytes=0-1023")
+                .build();
+
+        try (Response response = okHttpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                return false;
+            }
+            String contentType = response.header("Content-Type", "").toLowerCase();
+            String finalUrl = response.request().url().toString();
+            return contentType.startsWith("audio/")
+                    || finalUrl.endsWith(".mp3")
+                    || finalUrl.contains(".mp3?");
+        } catch (Exception e) {
+            log.warn("Audio url validation failed: {}", e.getMessage());
+            return false;
         }
     }
 

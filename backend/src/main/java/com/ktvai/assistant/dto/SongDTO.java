@@ -16,6 +16,8 @@ public class SongDTO {
     private String genre;
     
     private String sceneTags;
+
+    private String externalId;
     
     private String coverUrl;
     

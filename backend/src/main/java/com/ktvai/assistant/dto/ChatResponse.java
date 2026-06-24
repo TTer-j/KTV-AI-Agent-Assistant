@@ -20,4 +20,8 @@ public class ChatResponse {
     private String intentType;
 
     private String aiProvider;
+
+    private boolean aiConfigured;
+
+    private boolean aiUsed;
 }

@@ -9,12 +9,26 @@ export const speechRecognition = {
     
     const recognition = new SpeechRecognition()
     recognition.continuous = false
-    recognition.interimResults = false
+    recognition.interimResults = true
     recognition.lang = 'zh-CN'
+    recognition.maxAlternatives = 3
     
     recognition.onresult = (event) => {
-      const result = event.results[0][0].transcript
-      if (onResult) onResult(result)
+      let finalText = ''
+      let interimText = ''
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const text = event.results[i][0]?.transcript || ''
+        if (event.results[i].isFinal) {
+          finalText += text
+        } else {
+          interimText += text
+        }
+      }
+      if (onResult) onResult(finalText || interimText, Boolean(finalText))
+    }
+
+    recognition.onnomatch = () => {
+      if (onError) onError({ error: 'no-match' })
     }
     
     recognition.onerror = (event) => {

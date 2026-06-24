@@ -23,8 +23,9 @@ public class SongRetriever {
         
         switch (intent.getType()) {
             case "SONG_SEARCH":
-                if (intent.getSongName() != null && !intent.getSongName().isEmpty()) {
-                    results = songService.searchSongs(intent.getSongName());
+                String songKeyword = joinKeywords(intent.getSongName(), intent.getSinger(), intent.getGenre());
+                if (!songKeyword.isBlank()) {
+                    results = songService.searchSongs(songKeyword);
                 }
                 if (results.isEmpty() && intent.getSinger() != null) {
                     results = songService.searchSongs(intent.getSinger());
@@ -38,8 +39,9 @@ public class SongRetriever {
                 break;
                 
             case "GENRE_SEARCH":
-                if (intent.getGenre() != null) {
-                    results = songService.getSongsByGenre(intent.getGenre());
+                String genreKeyword = joinKeywords(intent.getSinger(), intent.getGenre(), intent.getSongName());
+                if (!genreKeyword.isBlank()) {
+                    results = songService.getSongsByGenre(genreKeyword);
                 }
                 break;
                 
@@ -48,6 +50,16 @@ public class SongRetriever {
         }
         
         return results;
+    }
+
+    private String joinKeywords(String... parts) {
+        List<String> tokens = new ArrayList<>();
+        for (String part : parts) {
+            if (part != null && !part.isBlank() && !tokens.contains(part.trim())) {
+                tokens.add(part.trim());
+            }
+        }
+        return String.join(" ", tokens);
     }
     
     public List<Song> retrieveWithRerank(IntentDTO intent, String userPreferences) {

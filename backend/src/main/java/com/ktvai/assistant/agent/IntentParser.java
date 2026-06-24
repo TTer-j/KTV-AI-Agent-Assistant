@@ -1,5 +1,7 @@
 package com.ktvai.assistant.agent;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ktvai.assistant.dto.IntentDTO;
 import com.ktvai.assistant.external.DeepSeekClient;
 import lombok.RequiredArgsConstructor;
@@ -12,33 +14,89 @@ import org.springframework.stereotype.Component;
 public class IntentParser {
     
     private final DeepSeekClient deepSeekClient;
+    private final ObjectMapper objectMapper = new ObjectMapper();
     
-    private static final String INTENT_SYSTEM_PROMPT = "你是一个专业的KTV智能点歌助手，擅长理解用户的口语化点歌需求。请根据用户输入分析意图：\n" +
-            "1. SONG_SEARCH - 用户想点具体的歌曲，包含歌曲名或歌手名\n" +
-            "2. SCENE_PLAYLIST - 用户想要场景歌单，如生日派对、朋友聚会、浪漫约会等\n" +
-            "3. GENRE_SEARCH - 用户想要特定曲风的歌曲，如摇滚、民谣、流行等\n" +
-            "4. CHAT - 用户在闲聊或打招呼\n" +
-            "5. CLARIFICATION - 用户需求模糊，需要追问更多信息\n" +
-            "请只返回意图类型，不要返回其他内容。";
+    private static final String INTENT_SYSTEM_PROMPT = """
+            你是 KTV 智能点歌系统的意图解析器。请把用户口语化点歌需求解析成 JSON，只返回 JSON，不要解释。
+            type 只能是 SONG_SEARCH、SCENE_PLAYLIST、GENRE_SEARCH、CHAT、CLARIFICATION。
+            字段：
+            - type: 意图类型
+            - songName: 明确歌曲名，没有则空字符串
+            - singer: 明确歌手名，没有则空字符串
+            - genre: 曲风、语种、情绪关键词，如 慢歌/情歌/粤语/告白/嗨歌，没有则空字符串
+            - scene: 场景，如 生日局/朋友聚会/情侣对唱/车载，没有则空字符串
+            - clarificationQuestion: 需要追问时的问题，否则空字符串
+            例子：
+            用户：来首周杰伦的慢歌
+            {"type":"SONG_SEARCH","songName":"","singer":"周杰伦","genre":"慢歌","scene":"","clarificationQuestion":""}
+            用户：我要唱适合告白的情歌
+            {"type":"GENRE_SEARCH","songName":"","singer":"","genre":"告白 情歌","scene":"","clarificationQuestion":""}
+            用户：生日局歌单
+            {"type":"SCENE_PLAYLIST","songName":"","singer":"","genre":"","scene":"生日局","clarificationQuestion":""}
+            用户：我要唱那首很火的歌
+            {"type":"CLARIFICATION","songName":"","singer":"","genre":"热门","scene":"","clarificationQuestion":"你记得是男歌手还是女歌手？国语还是粤语？"}
+            """;
     
     public IntentDTO parseIntent(String userInput) {
         IntentDTO fallback = parseFallback(userInput);
-        if (!"SONG_SEARCH".equals(fallback.getType()) || fallback.isNeedClarify()) {
+
+        if (!deepSeekClient.isConfigured()) {
             return fallback;
         }
 
         try {
-            String intentType = deepSeekClient.chat(INTENT_SYSTEM_PROMPT, userInput);
+            String aiJson = deepSeekClient.chat(INTENT_SYSTEM_PROMPT, userInput);
             
-            if (intentType == null || intentType.isEmpty()) {
+            if (aiJson == null || aiJson.isEmpty()) {
                 return fallback;
             }
-            
-            return buildIntent(normalizeIntentType(intentType), userInput);
+
+            IntentDTO aiIntent = parseAiIntent(aiJson, userInput);
+            return aiIntent == null ? fallback : aiIntent;
         } catch (Exception e) {
             log.warn("AI intent parsing failed, fallback to rule-based: {}", e.getMessage());
             return fallback;
         }
+    }
+
+    private IntentDTO parseAiIntent(String aiJson, String userInput) {
+        try {
+            String json = aiJson
+                    .replace("```json", "")
+                    .replace("```", "")
+                    .trim();
+            JsonNode root = objectMapper.readTree(json);
+            IntentDTO intent = new IntentDTO();
+            intent.setType(normalizeIntentType(root.path("type").asText("")));
+            intent.setSongName(blankToNull(root.path("songName").asText("")));
+            intent.setSinger(blankToNull(root.path("singer").asText("")));
+            intent.setGenre(blankToNull(root.path("genre").asText("")));
+            intent.setScene(blankToNull(root.path("scene").asText("")));
+            intent.setClarificationQuestion(blankToNull(root.path("clarificationQuestion").asText("")));
+            intent.setKeywords(java.util.Arrays.asList(userInput.trim().split("\\s+")));
+            intent.setNeedClarify("CLARIFICATION".equals(intent.getType()));
+            if (intent.isNeedClarify() && intent.getClarificationQuestion() == null) {
+                intent.setClarificationQuestion("你想偏男声还是女声？国语、粤语，还是某个年代的歌？");
+            }
+            if ("SONG_SEARCH".equals(intent.getType()) && intent.getSongName() == null && intent.getSinger() == null) {
+                intent.setSongName(userInput);
+            }
+            if ("GENRE_SEARCH".equals(intent.getType()) && intent.getGenre() == null) {
+                intent.setGenre(userInput);
+            }
+            if ("SCENE_PLAYLIST".equals(intent.getType()) && intent.getScene() == null) {
+                intent.setScene(userInput);
+            }
+            return intent;
+        } catch (Exception e) {
+            log.warn("AI intent JSON parse failed: {}", aiJson);
+            return null;
+        }
+    }
+
+    private String blankToNull(String text) {
+        String value = text == null ? "" : text.trim();
+        return value.isEmpty() ? null : value;
     }
 
     private String normalizeIntentType(String rawIntent) {
@@ -117,6 +175,7 @@ public class IntentParser {
                    normalized.contains("老歌")) {
             intent.setType("GENRE_SEARCH");
             intent.setGenre(normalized);
+            intent.setSinger(extractKnownSinger(normalized));
             intent.setNeedClarify(false);
         } else if (normalized.contains("你好") || normalized.contains("在吗") ||
                    normalized.contains("谢谢") || normalized.contains("你是谁")) {
@@ -125,9 +184,20 @@ public class IntentParser {
         } else {
             intent.setType("SONG_SEARCH");
             intent.setSongName(normalized);
+            intent.setSinger(extractKnownSinger(normalized));
             intent.setNeedClarify(false);
         }
         
         return intent;
+    }
+
+    private String extractKnownSinger(String text) {
+        String[] singers = {"周杰伦", "陈奕迅", "张学友", "林俊杰", "王菲", "邓丽君", "刘德华", "五月天", "孙燕姿", "梁静茹", "Beyond", "谭咏麟", "邓紫棋"};
+        for (String singer : singers) {
+            if (text != null && text.contains(singer)) {
+                return singer;
+            }
+        }
+        return null;
     }
 }

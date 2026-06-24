@@ -32,19 +32,25 @@ public class SongService {
     }
     
     public List<Song> getSongsByScene(String scene) {
-        List<Song> localSongs = songMapper.findByScene(scene, 10);
-        if (!localSongs.isEmpty()) {
-            return localSongs;
+        List<Song> apiSongs = musicApiClient.getSongsByScene(scene);
+        for (Song song : apiSongs) {
+            safeInsertMockSong(song);
         }
-        return musicApiClient.getSongsByScene(scene);
+        if (!apiSongs.isEmpty()) {
+            return apiSongs;
+        }
+        return songMapper.findByScene(scene, 10);
     }
     
     public List<Song> getSongsByGenre(String genre) {
-        List<Song> localSongs = songMapper.findByGenre(genre, 10);
-        if (!localSongs.isEmpty()) {
-            return localSongs;
+        List<Song> apiSongs = musicApiClient.getSongsByGenre(genre);
+        for (Song song : apiSongs) {
+            safeInsertMockSong(song);
         }
-        return musicApiClient.getSongsByGenre(genre);
+        if (!apiSongs.isEmpty()) {
+            return apiSongs;
+        }
+        return songMapper.findByGenre(genre, 10);
     }
     
     public Song getSongById(Long id) {
@@ -52,17 +58,17 @@ public class SongService {
     }
     
     public List<Song> getHotSongs(int limit) {
-        List<Song> localSongs = songMapper.selectList(null);
-        if (localSongs.isEmpty()) {
-            List<Song> apiSongs = musicApiClient.searchSongs("");
-            for (Song song : apiSongs) {
-                safeInsertMockSong(song);
-            }
-            return apiSongs.stream()
-                    .sorted(this::compareHotSong)
-                    .limit(limit)
-                    .collect(Collectors.toList());
+        List<Song> apiSongs = musicApiClient.searchSongs("");
+        for (Song song : apiSongs) {
+            safeInsertMockSong(song);
         }
+        if (!apiSongs.isEmpty()) {
+            return apiSongs.stream()
+                .sorted(this::compareHotSong)
+                .limit(limit)
+                .collect(Collectors.toList());
+        }
+        List<Song> localSongs = songMapper.selectList(null);
         return localSongs.stream()
                 .sorted(this::compareHotSong)
                 .limit(limit)

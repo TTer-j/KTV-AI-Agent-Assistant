@@ -84,6 +84,7 @@ public class SongController {
         dto.setAlbum(song.getAlbum());
         dto.setGenre(song.getGenre());
         dto.setSceneTags(song.getSceneTags());
+        dto.setExternalId(song.getExternalId());
         dto.setCoverUrl(song.getCoverUrl());
         dto.setAudioUrl(song.getAudioUrl());
         dto.setPopularity(song.getPopularity());

@@ -42,6 +42,7 @@
         <div>
           <p class="eyebrow">Room A08 · Voice Ready</p>
           <h1>一句话点歌，AI 帮你配完整歌单</h1>
+          <span class="ai-status" :class="{ ok: aiConfigured }">{{ aiStatus }}</span>
         </div>
         <div class="top-actions">
           <button class="icon-btn" title="清空对话" @click="resetChat">↺</button>
@@ -72,6 +73,11 @@
         <div class="quick-prompts">
           <button v-for="prompt in quickPrompts" :key="prompt" @click="quickAsk(prompt)">
             {{ prompt }}
+          </button>
+        </div>
+        <div class="voice-fallback">
+          <button v-for="prompt in voiceDemoPrompts" :key="prompt" @click="simulateVoice(prompt)">
+            模拟说：{{ prompt }}
           </button>
         </div>
         <p class="voice-status">{{ voiceStatus }}</p>
@@ -218,7 +224,7 @@ const STORAGE_KEYS = {
   dataVersion: 'ktv-ai-data-version'
 }
 
-const DATA_VERSION = 'music-api-v5-strict-netease'
+const DATA_VERSION = 'music-api-v6-playable-queue'
 
 const inputMessage = ref('')
 const isListening = ref(false)
@@ -238,6 +244,8 @@ const history = ref([])
 const savedPlaylists = ref([])
 const playlistName = ref('今晚已点')
 const currentIntent = ref('待命')
+const aiStatus = ref('正在检测 DeepSeek...')
+const aiConfigured = ref(false)
 const currentPlaying = ref(null)
 const musicPlayerRef = ref(null)
 const messageListRef = ref(null)
@@ -253,6 +261,11 @@ const quickPrompts = [
   '我要唱适合告白的情歌',
   '来点嗨的，适合聚会蹦迪',
   '给我找最近很火的粤语歌'
+]
+
+const voiceDemoPrompts = [
+  '来首周杰伦的慢歌',
+  '我要唱适合告白的情歌'
 ]
 
 const scenes = [
@@ -273,6 +286,7 @@ const preferenceTags = computed(() => {
 
 onMounted(async () => {
   localStorage.setItem(STORAGE_KEYS.session, sessionId.value)
+  await loadAiStatus()
   if (localStorage.getItem(STORAGE_KEYS.dataVersion) !== DATA_VERSION) {
     localStorage.removeItem(STORAGE_KEYS.queue)
     localStorage.removeItem(STORAGE_KEYS.favorites)
@@ -294,7 +308,7 @@ onMounted(async () => {
   if (queue.value.length === 0) {
     try {
       const res = await songApi.hot(4)
-      queue.value = sanitizeSongs(res.data.data || [])
+      queue.value = prioritizePlayable(sanitizeSongs(res.data.data || [])).slice(0, 4)
       persistQueue()
       syncPlayerQueue()
     } catch (error) {
@@ -302,6 +316,18 @@ onMounted(async () => {
     }
   }
 })
+
+const loadAiStatus = async () => {
+  try {
+    const res = await chatApi.status()
+    const data = res.data.data || {}
+    aiConfigured.value = Boolean(data.configured)
+    aiStatus.value = data.status || (aiConfigured.value ? 'DeepSeek 已配置' : 'DeepSeek 未配置')
+  } catch (error) {
+    aiConfigured.value = false
+    aiStatus.value = 'AI 状态检测失败'
+  }
+}
 
 const sendMessage = async () => {
   const text = inputMessage.value.trim()
@@ -315,6 +341,8 @@ const sendMessage = async () => {
     const res = await chatApi.chat({ sessionId: sessionId.value, userInput: text })
     const data = res.data.data || {}
     currentIntent.value = `${intentLabel(data.intentType, data.clarification)} · ${data.aiProvider || 'AI'}`
+    aiConfigured.value = Boolean(data.aiConfigured)
+    aiStatus.value = data.aiProvider || aiStatus.value
     const songs = sanitizeSongs(data.songs || [])
     const playlists = sanitizePlaylists(data.playlists || [])
     messages.value.push({
@@ -325,7 +353,7 @@ const sendMessage = async () => {
       playlists
     })
     if (songs.length) {
-      songs.slice(0, 3).forEach(addToQueue)
+      addPlayableRecommendations(songs)
     }
   } catch (error) {
     console.error('AI 点歌失败，降级到本地搜索', error)
@@ -345,7 +373,7 @@ const localFallback = async (text) => {
     songs,
     playlists: []
   })
-  songs.slice(0, 3).forEach(addToQueue)
+  addPlayableRecommendations(songs)
 }
 
 const quickAsk = (text) => {
@@ -371,7 +399,12 @@ const addToQueue = (song) => {
 }
 
 const addPlaylistSongs = (songs) => {
-  songs.forEach(addToQueue)
+  prioritizePlayable(songs).forEach(addToQueue)
+}
+
+const addPlayableRecommendations = (songs) => {
+  const playableSongs = prioritizePlayable(songs).filter(hasAudio)
+  playableSongs.slice(0, 3).forEach(addToQueue)
 }
 
 const removeFromQueue = (index) => {
@@ -415,6 +448,8 @@ const toggleFavorite = (song) => {
 const isFavorite = (song) => favorites.value.some(item => item.id === song.id)
 
 const hasAudio = (song) => Boolean(song?.audioUrl)
+
+const prioritizePlayable = (songs) => [...songs].sort((a, b) => Number(hasAudio(b)) - Number(hasAudio(a)))
 
 const saveCurrentPlaylist = () => {
   if (queue.value.length === 0) return
@@ -470,21 +505,23 @@ const toggleListening = () => {
   }
 
   if (!speechRecognition.isSupported()) {
-    startRecorderFallback()
+    showVoiceGuide('当前浏览器不支持 Web Speech 语音识别。可以换 Chrome/Edge，或先用下方“模拟说”测试点歌流程。')
     return
   }
 
   isListening.value = true
   voiceStatus.value = '正在听你说话...'
   recognition = speechRecognition.start(
-    (result) => {
+    (result, isFinal) => {
       voiceStatus.value = `识别到：${result}`
       inputMessage.value = result
-      sendMessage()
+      if (isFinal) {
+        sendMessage()
+      }
     },
     (error) => {
       isListening.value = false
-      startRecorderFallback()
+      showVoiceGuide(getSpeechErrorMessage(error?.error))
     },
     () => {
       if (!usingRecorderFallback) {
@@ -492,6 +529,35 @@ const toggleListening = () => {
       }
     }
   )
+}
+
+const simulateVoice = (text) => {
+  voiceStatus.value = `模拟语音：${text}`
+  inputMessage.value = text
+  sendMessage()
+}
+
+const getSpeechErrorMessage = (errorCode) => {
+  const messages = {
+    network: '浏览器在线语音服务连接失败。Web Speech 依赖浏览器语音服务和网络，可以先用“模拟说”测试流程。',
+    'not-allowed': '麦克风权限被拒绝。请在浏览器地址栏允许麦克风后再试。',
+    'service-not-allowed': '浏览器禁用了语音服务。请检查浏览器语音权限，或换 Chrome/Edge 测试。',
+    'no-speech': '没有听到声音。请靠近麦克风再说一次。',
+    'audio-capture': '没有检测到可用麦克风。请检查系统输入设备。',
+    'no-match': '没有识别出有效语音。可以再说一次，或用文字点歌。'
+  }
+  return messages[errorCode] || '语音识别暂时不可用，可以先用文字或“模拟说”点歌。'
+}
+
+const showVoiceGuide = (content) => {
+  voiceStatus.value = content
+  messages.value.push({
+    id: Date.now(),
+    role: 'ai',
+    content,
+    songs: [],
+    playlists: []
+  })
 }
 
 const startRecorderFallback = async () => {
@@ -842,6 +908,23 @@ const scrollMessages = async () => {
   letter-spacing: 0;
 }
 
+.ai-status {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 12px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.62);
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ai-status.ok {
+  color: #a9f3ff;
+  background: rgba(139, 233, 253, 0.12);
+}
+
 .top-actions {
   display: flex;
   gap: 10px;
@@ -904,15 +987,29 @@ textarea::placeholder {
   color: rgba(255, 255, 255, 0.38);
 }
 
-.quick-prompts {
+.quick-prompts,
+.voice-fallback {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   padding: 10px 66px 0;
 }
 
-.quick-prompts button {
+.voice-fallback {
+  padding-top: 8px;
+}
+
+.quick-prompts button,
+.voice-fallback button {
   cursor: pointer;
+}
+
+.voice-fallback button {
+  border: 1px solid rgba(139, 233, 253, 0.18);
+  border-radius: 999px;
+  padding: 8px 11px;
+  color: rgba(139, 233, 253, 0.88);
+  background: rgba(139, 233, 253, 0.08);
 }
 
 .voice-status {
@@ -1234,7 +1331,8 @@ textarea::placeholder {
     height: 44px;
   }
 
-  .quick-prompts {
+  .quick-prompts,
+  .voice-fallback {
     padding: 10px 0 0;
   }
 

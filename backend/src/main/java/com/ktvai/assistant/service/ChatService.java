@@ -32,7 +32,8 @@ public class ChatService {
         
         com.ktvai.assistant.dto.ChatResponse response = new com.ktvai.assistant.dto.ChatResponse();
         response.setSessionId(sessionId);
-        response.setAiProvider(deepSeekClient.isConfigured() ? "DeepSeek" : "本地规则兜底");
+        response.setAiConfigured(deepSeekClient.isConfigured());
+        response.setAiProvider(deepSeekClient.isConfigured() ? "DeepSeek 已配置" : "DeepSeek 未配置 · 本地规则兜底");
         
         try {
             IntentDTO intent = intentParser.parseIntent(userInput);
@@ -118,7 +119,7 @@ public class ChatService {
                     "你是一个专业的KTV智能点歌助手。根据找到的歌曲列表，用友好、热情的语气向用户介绍，不要超过100字。",
                     "用户搜索了：" + intent.getSongName() + "\n找到的歌曲：\n" + songInfo
             );
-            response.setReply(reply.isEmpty() ? generateFallbackSongReply(songDTOs) : reply);
+            response.setReply(chooseAiReply(response, reply, generateFallbackSongReply(songDTOs)));
         } catch (Exception e) {
             response.setReply(generateFallbackSongReply(songDTOs));
         }
@@ -144,7 +145,7 @@ public class ChatService {
                         "你是一个专业的KTV智能点歌助手。根据场景推荐歌单，用热情、有感染力的语气向用户介绍，不要超过100字。",
                         "用户需要：" + intent.getScene() + "场景的歌单\n推荐的歌单：\n" + playlistInfo
                 );
-                response.setReply(reply.isEmpty() ? generateFallbackPlaylistReply(playlists) : reply);
+                response.setReply(chooseAiReply(response, reply, generateFallbackPlaylistReply(playlists)));
             } catch (Exception e) {
                 response.setReply(generateFallbackPlaylistReply(playlists));
             }
@@ -177,7 +178,7 @@ public class ChatService {
                     "你是一个专业的KTV智能点歌助手。根据曲风推荐歌曲，用专业、热情的语气向用户介绍，不要超过100字。",
                     "用户需要：" + intent.getGenre() + "曲风的歌曲\n找到的歌曲：\n" + songInfo
             );
-            response.setReply(reply.isEmpty() ? generateFallbackGenreReply(songDTOs, intent.getGenre()) : reply);
+            response.setReply(chooseAiReply(response, reply, generateFallbackGenreReply(songDTOs, intent.getGenre())));
         } catch (Exception e) {
             response.setReply(generateFallbackGenreReply(songDTOs, intent.getGenre()));
         }
@@ -189,7 +190,7 @@ public class ChatService {
                     "你是一个友好的KTV智能点歌助手，擅长聊天和帮助用户点歌。请用轻松、友好的语气回复用户的问候或闲聊，不要超过50字。",
                     userInput
             );
-            response.setReply(reply.isEmpty() ? "你好！我是KTV智能点歌助手，你可以告诉我想唱什么歌。" : reply);
+            response.setReply(chooseAiReply(response, reply, "你好！我是KTV智能点歌助手，你可以告诉我想唱什么歌。"));
         } catch (Exception e) {
             response.setReply("你好！我是KTV智能点歌助手，你可以告诉我想唱什么歌，或者需要什么场景的歌单。");
         }
@@ -235,10 +236,30 @@ public class ChatService {
         dto.setAlbum(song.getAlbum());
         dto.setGenre(song.getGenre());
         dto.setSceneTags(song.getSceneTags());
+        dto.setExternalId(song.getExternalId());
         dto.setCoverUrl(song.getCoverUrl());
         dto.setAudioUrl(song.getAudioUrl());
         dto.setPopularity(song.getPopularity());
         dto.setDuration(song.getDuration());
         return dto;
+    }
+
+    private String chooseAiReply(com.ktvai.assistant.dto.ChatResponse response, String aiReply, String fallback) {
+        if (!deepSeekClient.isConfigured()) {
+            response.setAiConfigured(false);
+            response.setAiUsed(false);
+            response.setAiProvider("DeepSeek 未配置 · 本地规则兜底");
+            return fallback;
+        }
+        if (aiReply == null || aiReply.isBlank()) {
+            response.setAiConfigured(true);
+            response.setAiUsed(false);
+            response.setAiProvider("DeepSeek 调用失败 · 本地规则兜底");
+            return fallback;
+        }
+        response.setAiConfigured(true);
+        response.setAiUsed(true);
+        response.setAiProvider("DeepSeek 已调用");
+        return aiReply;
     }
 }
